@@ -1,0 +1,102 @@
+- name: Provision EC2 instances
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ansible_vars.yaml
+  tasks:
+    #Create EC2 instance
+    - ec2:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        ec2_region: "{{ aws_region }}"
+        assign_public_ip: yes
+        instance_type: "{{ instance_type }}"
+        image: "{{ aws_ami }}"
+        keypair: ansible_key
+        vpc_subnet_id: "{{ aws_subnet_id }}"
+        group_id: "{{ aws_security_group }}"
+        exact_count: 1
+        count_tag:
+          name: ebs_demo
+        instance_tags:
+          name: ebs_demo
+        wait: yes
+      register: ec2
+    - debug:
+        var: ec2
+
+    #Gather and save EC2 metadata
+    - ec2_instance_facts:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        filters:
+          instance-state-name: "running"
+          tag:name: ebs_demo
+      register: ec2_facts
+
+    #Create EBS volumes
+    - ec2_vol:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        instance: "{{ ec2_facts.instances[0].instance_id }}"
+        region: "{{ aws_region }}"
+        volume_size: 10
+        device_name: "{{ item }}"
+      with_items:
+        - "sdb"
+        - "sdc"
+      register: ebs_vols
+    - debug:
+        var: ebs_vols
+
+    #Add instance to in memory inventory
+    - name: Add instances to inventory
+      add_host:
+        hostname: "{{ item.public_ip }}"
+        groupname: ec2group
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_ssh_private_key_file: /home/ec2-user/ansible_keypair.pem
+      loop: "{{ ec2.instances }}"
+
+#Print in-memory inventory
+- name: Print inventory
+  hosts: ec2group
+  gather_facts: false
+  tasks:
+    - debug: msg="{{ inventory_hostname }}"
+
+#Wait for remote host to become reachable
+- name: Ping new EC2 instances
+  hosts: ec2group
+  gather_facts: false
+  remote_user: ec2-user
+  tasks:
+    - name: Wait for instances to be reachable
+      wait_for_connection:
+        delay: 5
+        timeout: 90
+
+    - name: Ping ec2 instances
+      ping:
+
+#Partition volumes
+- name: Create Partitions
+  hosts: ec2group
+  become: true
+  gather_facts: true
+  tasks:
+    - parted:
+        device: /dev/xvdb
+        number: 2
+        state: present
+        label: gpt
+        part_start: 1GiB
+        part_end: 6GiB
+
+    - parted:
+        device: /dev/xvdc
+        number: 2
+        state: present
+        label: gpt
+        part_start: 1GiB
+        part_end: 7GiB
